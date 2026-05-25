@@ -20,6 +20,72 @@ This repository includes the ComfyUI node code and a built-in Mega-ASR inference
 - Returns transcription text, raw JSON metadata, selected route, router probability, detected language, and temporary audio path.
 - Includes an environment-status node for checking model files and dependencies.
 
+## Supported Languages
+
+Mega-ASR uses Qwen3-ASR-1.7B as the base ASR model. According to the official Qwen3-ASR documentation, it supports language identification and speech recognition for **30 languages and 22 Chinese dialects/accents**.
+
+The node's `language` input can be left as `auto` for automatic language detection. You can also set a language hint manually when the input language is known.
+
+Supported languages:
+
+- Chinese `zh`
+- English `en`
+- Cantonese `yue`
+- Arabic `ar`
+- German `de`
+- French `fr`
+- Spanish `es`
+- Portuguese `pt`
+- Indonesian `id`
+- Italian `it`
+- Korean `ko`
+- Russian `ru`
+- Thai `th`
+- Vietnamese `vi`
+- Japanese `ja`
+- Turkish `tr`
+- Hindi `hi`
+- Malay `ms`
+- Dutch `nl`
+- Swedish `sv`
+- Danish `da`
+- Finnish `fi`
+- Polish `pl`
+- Czech `cs`
+- Filipino `fil`
+- Persian `fa`
+- Greek `el`
+- Hungarian `hu`
+- Macedonian `mk`
+- Romanian `ro`
+
+Supported Chinese dialects/accents:
+
+- Anhui
+- Dongbei
+- Fujian
+- Gansu
+- Guizhou
+- Hebei
+- Henan
+- Hubei
+- Hunan
+- Jiangxi
+- Ningxia
+- Shandong
+- Shaanxi
+- Shanxi
+- Sichuan
+- Tianjin
+- Yunnan
+- Zhejiang
+- Cantonese (Hong Kong accent)
+- Cantonese (Guangdong accent)
+- Wu language
+- Minnan language
+
+Sources: [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/blob/main/README.md), [QwenLM/Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR).
+
 ## Model Layout
 
 Download `zhifeixie/Mega-ASR` from Hugging Face and place its contents here:
