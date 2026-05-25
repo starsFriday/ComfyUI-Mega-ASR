@@ -6,8 +6,6 @@ ComfyUI nodes for local [Mega-ASR](https://huggingface.co/zhifeixie/Mega-ASR) sp
 
 Example workflow: [`workflow/Mega-ASR.json`](workflow/Mega-ASR.json)
 
-Project repository: [starsFriday/ComfyUI-Mega-ASR.git](https://github.com/starsFriday/ComfyUI-Mega-ASR.git)
-
 Mega-ASR is a robust ASR system built on Qwen3-ASR-1.7B. It combines the base Qwen3-ASR model, Mega-ASR LoRA adaptation weights, and an audio-quality router. The router decides whether each input should run through the robust Mega-ASR path or the base recognition path.
 
 This repository includes the ComfyUI node code and a built-in Mega-ASR inference adapter based on the official implementation from [xzf-thu/Mega-ASR.git](https://github.com/xzf-thu/Mega-ASR.git). You do not need to clone the official Mega-ASR source separately.
