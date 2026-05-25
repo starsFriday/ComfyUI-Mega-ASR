@@ -182,9 +182,13 @@ def _extract_text(result: Any) -> str:
 
 
 def _extract_language(result: Any) -> str:
+    if isinstance(result, dict):
+        lang = result.get("language") or result.get("detected_language") or result.get("lang")
+        if lang:
+            return str(lang)
     for item in _iter_result_objects(result):
         if isinstance(item, dict):
-            lang = item.get("language") or item.get("lang")
+            lang = item.get("language") or item.get("detected_language") or item.get("lang")
         else:
             lang = getattr(item, "language", None) or getattr(item, "lang", None)
         if lang:
@@ -350,6 +354,16 @@ def _run_transcription(
                 routed_result.get("route_source") if isinstance(routed_result, dict) else None
             ),
         }
+        if isinstance(routed_result, dict):
+            for key in (
+                "route_label",
+                "segmented",
+                "segments",
+                "segment_seconds",
+                "overlap_seconds",
+            ):
+                if key in routed_result:
+                    route_payload[key] = routed_result[key]
 
     text = _extract_text(raw_result)
     detected_language = _extract_language(raw_result)
@@ -362,11 +376,12 @@ def _run_transcription(
         "raw_result": _jsonable(raw_result),
     }
     raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
-    route_label = routing_mode
-    if route_payload.get("use_lora") is True:
-        route_label = "mega_lora"
-    elif route_payload.get("use_lora") is False:
-        route_label = "base"
+    route_label = str(route_payload.get("route_label") or routing_mode)
+    if "route_label" not in route_payload:
+        if route_payload.get("use_lora") is True:
+            route_label = "mega_lora"
+        elif route_payload.get("use_lora") is False:
+            route_label = "base"
     return (
         text,
         raw_json,
@@ -426,7 +441,7 @@ class MegaASRLoader:
                 ),
                 "max_new_tokens": (
                     "INT",
-                    {"default": 256, "min": 32, "max": 8192, "step": 32},
+                    {"default": 1024, "min": 32, "max": 8192, "step": 32},
                 ),
                 "max_inference_batch_size": (
                     "INT",

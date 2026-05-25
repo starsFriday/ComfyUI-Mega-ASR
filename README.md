@@ -17,7 +17,8 @@ This repository includes the ComfyUI node code and a built-in Mega-ASR inference
 - Uses the standard ComfyUI model folder: `ComfyUI/models/Mega-ASR`.
 - Built-in Mega-ASR wrapper, audio-quality router, and LoRA adapter switching.
 - Supports router mode, always-on Mega-ASR LoRA mode, and base-only mode.
-- Returns transcription text, raw JSON metadata, selected route, router probability, detected language, and temporary audio path.
+- Automatically splits long local audio in the backend, transcribes each segment, and merges the text in order.
+- Returns transcription text, raw JSON metadata, selected route, router probability, detected language, segment metadata, and temporary audio path.
 - Includes an environment-status node for checking model files and dependencies.
 
 ## Supported Languages
@@ -150,6 +151,14 @@ If you already downloaded the model manually, copy or move the Hugging Face fold
 
 Restart ComfyUI after installing dependencies and model files.
 
+## Long Audio
+
+Long audio is handled automatically inside the backend inference adapter. The ComfyUI nodes still make one transcription call; the backend checks the local audio duration, splits files longer than about 30 seconds into temporary wav segments, runs ASR on each segment, and joins the segment text in chronological order.
+
+When `routing_mode` is `auto_router`, each segment is routed independently, so a long file can contain both `base` and `mega_lora` segments. In that case the route output can be `mixed`, and `raw_response` includes per-segment start time, end time, route, detected language, text, and raw model result.
+
+No extra ComfyUI controls are required for this behavior.
+
 ## Nodes
 
 ### Mega-ASR Loader
@@ -166,7 +175,7 @@ Inputs:
 - `dtype`: `auto`, `bfloat16`, `float16`, or `float32`.
 - `attn_implementation`: `default`, `flash_attention_2`, `sdpa`, or `eager`.
 - `quality_threshold`: router threshold. The official default is `0.5`.
-- `max_new_tokens`: decoding limit. The official Mega-ASR wrapper default is `256`.
+- `max_new_tokens`: decoding limit. This node defaults to `1024` for longer transcripts, such as songs or long-form audio.
 - `max_inference_batch_size`: passed to Qwen3-ASR.
 - `low_cpu_mem_usage`: passed to model loading.
 - `keep_delta_on_gpu`: cache full LoRA deltas on GPU after first switch. Leave this off unless you have enough VRAM.
@@ -192,8 +201,8 @@ Inputs:
 Outputs:
 
 - `text`: transcription text.
-- `raw_response`: JSON payload with route and raw model result.
-- `route`: `mega_lora`, `base`, or the forced mode label.
+- `raw_response`: JSON payload with route, segment metadata, and raw model result.
+- `route`: `mega_lora`, `base`, `mixed`, or the forced mode label.
 - `quality_prob`: router degraded-audio probability, or `-1` when not routed.
 - `detected_language`: language field if returned by Qwen3-ASR.
 - `temp_audio_path`: temporary wav created from the ComfyUI audio input.

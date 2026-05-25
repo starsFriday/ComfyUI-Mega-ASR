@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
+import tempfile
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +20,18 @@ import torchaudio
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import safe_open
 from scipy.signal import resample_poly
+
+
+@dataclass(frozen=True)
+class AudioSegment:
+    path: str
+    index: int
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
 
 
 class LogMelSpectrogram(nn.Module):
@@ -162,11 +178,16 @@ class AudioQualityRouter:
         device: str | None = None,
         threshold: float = 0.5,
         sample_rate: int = 16000,
+        max_duration: float = 30.0,
+        max_router_chunks: int = 3,
     ) -> None:
         self.checkpoint_path = str(Path(checkpoint_path).expanduser())
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.threshold = float(threshold)
         self.sample_rate = int(sample_rate)
+        self.max_duration = float(max_duration)
+        self.max_router_chunks = max(1, int(max_router_chunks))
+        self.max_samples = max(1, int(self.sample_rate * self.max_duration))
         self.model, self.mel_extractor = self._load_model()
 
     def _load_model(self) -> tuple[nn.Module, nn.Module]:
@@ -176,11 +197,20 @@ class AudioQualityRouter:
                 metadata = f.metadata()
             checkpoint_config = json.loads(metadata.get("config", "{}")) if metadata else {}
             config = checkpoint_config.get("model", {})
+            data_config = checkpoint_config.get("data", {})
             state_dict = safe_load_file(str(checkpoint_path), device=self.device)
         else:
             checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
-            config = checkpoint.get("config", {}).get("model", {})
+            checkpoint_config = checkpoint.get("config", {})
+            config = checkpoint_config.get("model", {})
+            data_config = checkpoint_config.get("data", {})
             state_dict = checkpoint["model_state_dict"]
+
+        if "sample_rate" in data_config:
+            self.sample_rate = int(data_config["sample_rate"])
+        if "max_duration" in data_config:
+            self.max_duration = float(data_config["max_duration"])
+        self.max_samples = max(1, int(self.sample_rate * self.max_duration))
 
         model = AudioQualityClassifier(
             n_mels=config.get("n_mels", 80),
@@ -215,19 +245,40 @@ class AudioQualityRouter:
         waveform = torch.from_numpy(audio_np).float().unsqueeze(0)
         return waveform.to(self.device)
 
+    def _router_chunks(self, waveform: torch.Tensor) -> list[torch.Tensor]:
+        total_samples = int(waveform.shape[-1])
+        if total_samples <= self.max_samples:
+            return [waveform]
+
+        chunk_count = min(self.max_router_chunks, math.ceil(total_samples / self.max_samples))
+        if chunk_count <= 1:
+            starts = [0]
+        else:
+            max_start = total_samples - self.max_samples
+            starts = [round(i * max_start / (chunk_count - 1)) for i in range(chunk_count)]
+        return [waveform[:, start : start + self.max_samples] for start in starts]
+
     @torch.no_grad()
     def infer(self, audio_path: str | os.PathLike[str]) -> dict[str, Any]:
         waveform = self._load_audio(audio_path)
-        mel = self.mel_extractor(waveform)
-        mel = mel.squeeze(0).transpose(0, 1).unsqueeze(0)
-        logits = self.model(mel, mask=None)
-        probs = torch.softmax(logits, dim=-1)
-        degraded_prob = float(probs[0, 1].item())
+        degraded_probs: list[float] = []
+        for chunk in self._router_chunks(waveform):
+            mel = self.mel_extractor(chunk)
+            mel = mel.squeeze(0).transpose(0, 1).unsqueeze(0)
+            if mel.shape[1] > self.model.pos_encoder.pe.shape[1]:
+                mel = mel[:, : self.model.pos_encoder.pe.shape[1], :]
+            logits = self.model(mel, mask=None)
+            probs = torch.softmax(logits, dim=-1)
+            degraded_probs.append(float(probs[0, 1].item()))
+
+        degraded_prob = max(degraded_probs) if degraded_probs else 0.0
         is_degraded = degraded_prob >= self.threshold
         return {
             "is_degraded": is_degraded,
             "degraded_prob": degraded_prob,
             "label": int(is_degraded),
+            "router_chunks": len(degraded_probs),
+            "router_max_duration": self.max_duration,
         }
 
     def predict(self, audio_path: str | os.PathLike[str]) -> tuple[bool, float]:
@@ -324,7 +375,7 @@ class Qwen3ASR:
         device_map: str | None = None,
         dtype: Any | None = None,
         max_inference_batch_size: int = 32,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 1024,
         **model_kwargs: Any,
     ) -> None:
         from qwen_asr import Qwen3ASRModel
@@ -363,6 +414,54 @@ class Qwen3ASR:
         return str(getattr(results, "text", results)).strip()
 
 
+
+def _iter_result_objects(result: Any):
+    if isinstance(result, dict) and "text" in result:
+        yield from _iter_result_objects(result["text"])
+    elif isinstance(result, (list, tuple)):
+        yield from result
+    else:
+        yield result
+
+
+def _extract_result_text(result: Any) -> str:
+    texts: list[str] = []
+    for item in _iter_result_objects(result):
+        if item is None:
+            continue
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            text = item["text"]
+        elif hasattr(item, "text"):
+            text = getattr(item, "text")
+        else:
+            text = str(item)
+        text = str(text).strip()
+        if text:
+            texts.append(text)
+    return "\n".join(texts).strip()
+
+
+def _extract_result_language(result: Any) -> str:
+    if isinstance(result, dict):
+        lang = result.get("language") or result.get("detected_language") or result.get("lang")
+        if lang:
+            return str(lang)
+    for item in _iter_result_objects(result):
+        if isinstance(item, dict):
+            lang = item.get("language") or item.get("detected_language") or item.get("lang")
+        else:
+            lang = getattr(item, "language", None) or getattr(item, "lang", None)
+        if lang:
+            return str(lang)
+    return ""
+
+
+def _merge_segment_texts(texts: list[str]) -> str:
+    return "\n".join(text.strip() for text in texts if text and text.strip()).strip()
+
+
 class MegaASR:
     NAME = "Mega-ASR"
 
@@ -377,8 +476,12 @@ class MegaASR:
         device_map: str | None = None,
         quality_device: str | None = None,
         max_inference_batch_size: int = 32,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 1024,
         keep_delta_on_gpu: bool = False,
+        split_long_audio: bool = True,
+        long_audio_segment_seconds: float = 30.0,
+        long_audio_overlap_seconds: float = 0.0,
+        long_audio_min_tail_seconds: float = 1.0,
         **model_kwargs: Any,
     ) -> None:
         self.model_path = str(Path(model_path).expanduser())
@@ -386,6 +489,12 @@ class MegaASR:
         self.router_checkpoint = str(Path(router_checkpoint).expanduser())
         self.routing_enabled = bool(routing_enabled)
         self.keep_delta_on_gpu = bool(keep_delta_on_gpu)
+        self.split_long_audio = bool(split_long_audio)
+        self.long_audio_segment_seconds = max(1.0, float(long_audio_segment_seconds))
+        self.long_audio_overlap_seconds = max(0.0, float(long_audio_overlap_seconds))
+        if self.long_audio_overlap_seconds >= self.long_audio_segment_seconds:
+            self.long_audio_overlap_seconds = 0.0
+        self.long_audio_min_tail_seconds = max(0.0, float(long_audio_min_tail_seconds))
         self.stats = {"total": 0, "use_base": 0, "use_lora": 0}
         self.switch_times: list[dict[str, float | str]] = []
         self.router = None
@@ -427,6 +536,129 @@ class MegaASR:
             self.switch_times.append({"direction": direction, "time": elapsed})
         self._active_lora = active
 
+    @staticmethod
+    def _local_audio_path(audio: Any) -> Path | None:
+        if not isinstance(audio, (str, os.PathLike)):
+            return None
+        path = Path(audio).expanduser()
+        if not path.is_file():
+            return None
+        return path
+
+    def _segment_windows(self, duration: float) -> list[tuple[float, float]]:
+        if duration <= self.long_audio_segment_seconds:
+            return []
+
+        windows: list[tuple[float, float]] = []
+        step = max(0.1, self.long_audio_segment_seconds - self.long_audio_overlap_seconds)
+        start = 0.0
+        while start < duration:
+            remaining = duration - start
+            if windows and remaining <= self.long_audio_min_tail_seconds:
+                previous_start, _ = windows[-1]
+                windows[-1] = (previous_start, duration)
+                break
+
+            end = min(duration, start + self.long_audio_segment_seconds)
+            windows.append((start, end))
+            if end >= duration:
+                break
+            start += step
+
+        return windows if len(windows) > 1 else []
+
+    def _split_audio_with_soundfile(self, audio_path: Path, temp_dir: Path) -> list[AudioSegment]:
+        segments: list[AudioSegment] = []
+        with sf.SoundFile(str(audio_path)) as source:
+            sample_rate = int(source.samplerate)
+            total_frames = int(len(source))
+            if sample_rate <= 0 or total_frames <= 0:
+                return []
+
+            windows = self._segment_windows(total_frames / float(sample_rate))
+            for index, (start, end) in enumerate(windows):
+                start_frame = max(0, min(total_frames, round(start * sample_rate)))
+                end_frame = max(start_frame, min(total_frames, round(end * sample_rate)))
+                frame_count = end_frame - start_frame
+                if frame_count <= 0:
+                    continue
+
+                source.seek(start_frame)
+                data = source.read(frame_count, dtype="float32", always_2d=True)
+                if data.size == 0:
+                    continue
+
+                chunk_path = temp_dir / f"chunk_{index:04d}_{start_frame}_{end_frame}.wav"
+                sf.write(str(chunk_path), data, sample_rate)
+                segments.append(
+                    AudioSegment(
+                        path=str(chunk_path),
+                        index=index,
+                        start=start_frame / float(sample_rate),
+                        end=end_frame / float(sample_rate),
+                    )
+                )
+        return segments
+
+    def _split_audio_with_torchaudio(self, audio_path: Path, temp_dir: Path) -> list[AudioSegment]:
+        waveform, sample_rate = torchaudio.load(str(audio_path))
+        sample_rate = int(sample_rate)
+        total_frames = int(waveform.shape[-1])
+        if sample_rate <= 0 or total_frames <= 0:
+            return []
+
+        segments: list[AudioSegment] = []
+        windows = self._segment_windows(total_frames / float(sample_rate))
+        for index, (start, end) in enumerate(windows):
+            start_frame = max(0, min(total_frames, round(start * sample_rate)))
+            end_frame = max(start_frame, min(total_frames, round(end * sample_rate)))
+            if end_frame <= start_frame:
+                continue
+
+            chunk = waveform[:, start_frame:end_frame].contiguous()
+            chunk_path = temp_dir / f"chunk_{index:04d}_{start_frame}_{end_frame}.wav"
+            torchaudio.save(str(chunk_path), chunk, sample_rate)
+            segments.append(
+                AudioSegment(
+                    path=str(chunk_path),
+                    index=index,
+                    start=start_frame / float(sample_rate),
+                    end=end_frame / float(sample_rate),
+                )
+            )
+        return segments
+
+    def _split_audio_if_needed(self, audio: Any) -> tuple[list[AudioSegment] | None, Path | None]:
+        if not self.split_long_audio:
+            return None, None
+
+        audio_path = self._local_audio_path(audio)
+        if audio_path is None:
+            return None, None
+
+        temp_dir = Path(tempfile.gettempdir()) / "comfyui_mega_asr_segments" / uuid.uuid4().hex
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            try:
+                segments = self._split_audio_with_soundfile(audio_path, temp_dir)
+            except Exception:
+                segments = self._split_audio_with_torchaudio(audio_path, temp_dir)
+
+            if len(segments) <= 1:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return None, None
+            return segments, temp_dir
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, None
+
+    def _record_route(self, use_lora: bool) -> None:
+        self.stats["total"] += 1
+        if use_lora:
+            self.stats["use_lora"] += 1
+        else:
+            self.stats["use_base"] += 1
+
     def _route(self, audio: Any) -> tuple[bool, float | None, str]:
         if self.routing_enabled and self.router is not None:
             is_degraded, degraded_prob = self.router.predict(audio)
@@ -438,6 +670,168 @@ class MegaASR:
             self._set_lora(use_lora)
             return self.asr.infer(audio, **kwargs)
 
+    @staticmethod
+    def _route_label(use_lora: bool | None) -> str:
+        if use_lora is True:
+            return "mega_lora"
+        if use_lora is False:
+            return "base"
+        return "mixed"
+
+    def _summarize_segment_routes(self, segments: list[dict[str, Any]]) -> dict[str, Any]:
+        routes = [segment["route"] for segment in segments]
+        lora_values = [route.get("use_lora") for route in routes]
+        if lora_values and all(value is True for value in lora_values):
+            use_lora: bool | None = True
+        elif lora_values and all(value is False for value in lora_values):
+            use_lora = False
+        else:
+            use_lora = None
+
+        probs = [route.get("degraded_prob") for route in routes if route.get("degraded_prob") is not None]
+        route_sources = sorted({str(route.get("route_source")) for route in routes if route.get("route_source")})
+        if route_sources == ["router"]:
+            route_source = "segmented_router"
+        elif route_sources:
+            route_source = "segmented_" + "+".join(route_sources)
+        else:
+            route_source = "segmented"
+
+        return {
+            "use_lora": use_lora,
+            "degraded_prob": max(probs) if probs else None,
+            "route_source": route_source,
+            "route_label": self._route_label(use_lora),
+            "segmented": True,
+            "segments": [
+                {
+                    "index": segment["index"],
+                    "start": segment["start"],
+                    "end": segment["end"],
+                    "duration": segment["duration"],
+                    "text": segment["text"],
+                    "language": segment["language"],
+                    "route": segment["route"],
+                }
+                for segment in segments
+            ],
+        }
+
+    def _infer_segmented(
+        self,
+        original_audio: Any,
+        segments: list[AudioSegment],
+        *,
+        language: str | None,
+        return_objects: bool,
+        fixed_use_lora: bool | None,
+        transcribe_kwargs: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        segment_payloads: list[dict[str, Any]] = []
+        texts: list[str] = []
+        languages: list[str] = []
+
+        for segment in segments:
+            if fixed_use_lora is None:
+                use_lora, degraded_prob, route_source = self._route(segment.path)
+            else:
+                use_lora = fixed_use_lora
+                degraded_prob = None
+                route_source = "forced_lora" if fixed_use_lora else "forced_base"
+
+            raw_result = self._infer_with_adapter_state(
+                use_lora,
+                segment.path,
+                language=language,
+                return_objects=return_objects,
+                **transcribe_kwargs,
+            )
+            self._record_route(use_lora)
+
+            text = _extract_result_text(raw_result)
+            detected_language = _extract_result_language(raw_result)
+            if text:
+                texts.append(text)
+            if detected_language and detected_language not in languages:
+                languages.append(detected_language)
+
+            segment_payloads.append(
+                {
+                    "index": segment.index,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "duration": segment.duration,
+                    "text": text,
+                    "language": detected_language,
+                    "route": {
+                        "use_lora": use_lora,
+                        "degraded_prob": degraded_prob,
+                        "route_source": route_source,
+                    },
+                    "raw_result": raw_result,
+                }
+            )
+
+        joined_text = _merge_segment_texts(texts)
+        detected_language = languages[0] if languages else ""
+        result_payload = {
+            "text": joined_text,
+            "language": detected_language,
+            "segmented": True,
+            "audio_path": str(original_audio),
+            "segment_seconds": self.long_audio_segment_seconds,
+            "overlap_seconds": self.long_audio_overlap_seconds,
+            "segments": segment_payloads,
+        }
+        result = result_payload if return_objects else joined_text
+        return result, self._summarize_segment_routes(segment_payloads)
+
+    def _infer_maybe_segmented(
+        self,
+        audio: Any,
+        *,
+        language: str | None,
+        return_objects: bool,
+        fixed_use_lora: bool | None,
+        transcribe_kwargs: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        segments, temp_dir = self._split_audio_if_needed(audio)
+        if segments is not None and temp_dir is not None:
+            try:
+                return self._infer_segmented(
+                    audio,
+                    segments,
+                    language=language,
+                    return_objects=return_objects,
+                    fixed_use_lora=fixed_use_lora,
+                    transcribe_kwargs=transcribe_kwargs,
+                )
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if fixed_use_lora is None:
+            use_lora, degraded_prob, route_source = self._route(audio)
+        else:
+            use_lora = fixed_use_lora
+            degraded_prob = None
+            route_source = "forced_lora" if fixed_use_lora else "forced_base"
+
+        result = self._infer_with_adapter_state(
+            use_lora,
+            audio,
+            language=language,
+            return_objects=return_objects,
+            **transcribe_kwargs,
+        )
+        self._record_route(use_lora)
+        return result, {
+            "use_lora": use_lora,
+            "degraded_prob": degraded_prob,
+            "route_source": route_source,
+            "route_label": self._route_label(use_lora),
+            "segmented": False,
+        }
+
     def infer(
         self,
         audio: Any,
@@ -448,33 +842,50 @@ class MegaASR:
         **transcribe_kwargs: Any,
     ) -> Any:
         audio = self._unwrap_audio(audio)
-        use_lora, degraded_prob, route_source = self._route(audio)
-        result = self._infer_with_adapter_state(
-            use_lora,
+        result, route_payload = self._infer_maybe_segmented(
             audio,
             language=language,
             return_objects=return_objects,
-            **transcribe_kwargs,
+            fixed_use_lora=None,
+            transcribe_kwargs=transcribe_kwargs,
         )
-        self.stats["total"] += 1
-        if use_lora:
-            self.stats["use_lora"] += 1
-        else:
-            self.stats["use_base"] += 1
         if return_route:
-            return {
-                "text": result,
-                "use_lora": use_lora,
-                "degraded_prob": degraded_prob,
-                "route_source": route_source,
-            }
+            return {"text": result, **route_payload}
         return result
 
-    def infer_with_lora(self, audio: Any, **kwargs: Any) -> Any:
-        return self._infer_with_adapter_state(True, self._unwrap_audio(audio), **kwargs)
+    def infer_with_lora(
+        self,
+        audio: Any,
+        *,
+        language: str | None = None,
+        return_objects: bool = False,
+        **transcribe_kwargs: Any,
+    ) -> Any:
+        result, _ = self._infer_maybe_segmented(
+            self._unwrap_audio(audio),
+            language=language,
+            return_objects=return_objects,
+            fixed_use_lora=True,
+            transcribe_kwargs=transcribe_kwargs,
+        )
+        return result
 
-    def infer_without_lora(self, audio: Any, **kwargs: Any) -> Any:
-        return self._infer_with_adapter_state(False, self._unwrap_audio(audio), **kwargs)
+    def infer_without_lora(
+        self,
+        audio: Any,
+        *,
+        language: str | None = None,
+        return_objects: bool = False,
+        **transcribe_kwargs: Any,
+    ) -> Any:
+        result, _ = self._infer_maybe_segmented(
+            self._unwrap_audio(audio),
+            language=language,
+            return_objects=return_objects,
+            fixed_use_lora=False,
+            transcribe_kwargs=transcribe_kwargs,
+        )
+        return result
 
     @torch.no_grad()
     def batch_infer(self, audios: list[Any], **kwargs: Any) -> list[Any]:
