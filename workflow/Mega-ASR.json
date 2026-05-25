@@ -1,0 +1,240 @@
+{
+  "id": "3fb92ba1-e188-4f96-a917-76fe41613b68",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "MegaASRLoader",
+      "pos": [
+        3814.699880119889,
+        -343.0801632081004
+      ],
+      "size": [
+        313.015625,
+        294
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MEGA_ASR_MODEL",
+          "links": [
+            1
+          ]
+        },
+        {
+          "name": "model_info",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MegaASRLoader"
+      },
+      "widgets_values": [
+        "auto_router",
+        "auto",
+        "auto",
+        "default",
+        0.5,
+        256,
+        32,
+        true,
+        false,
+        false
+      ]
+    },
+    {
+      "id": 2,
+      "type": "MegaASRTranscribeAudio",
+      "pos": [
+        4166.285878988424,
+        -326.6065792296662
+      ],
+      "size": [
+        400,
+        236
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MEGA_ASR_MODEL",
+          "link": 1
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "links": [
+            3
+          ]
+        },
+        {
+          "name": "raw_response",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "route",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "quality_prob",
+          "type": "FLOAT",
+          "links": null
+        },
+        {
+          "name": "detected_language",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "temp_audio_path",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MegaASRTranscribeAudio"
+      },
+      "widgets_values": [
+        "auto",
+        true,
+        "{}"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "easy showAnything",
+      "pos": [
+        4243.565889447417,
+        -11.831902482088687
+      ],
+      "size": [
+        305.01252787584053,
+        161.67628653989584
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "输入任何",
+          "name": "anything",
+          "shape": 7,
+          "type": "*",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-easy-use",
+        "ver": "1.3.5",
+        "Node name for S&R": "easy showAnything"
+      },
+      "widgets_values": [
+        "Hi guys, Ivana Alawi here. May slot apako na super legit at sobrang dalilang manalo. I-download mo lang, may limapputwalong piso ka agad. Mag-deposit ng isang daang piso, boom, may dalawang libo limapputwalong piso bonus pa. Plus tatlong putwalong beses super ace multiplier. Cash out, seconds lang via Gcash. Walang limit, walang hassle. Pero limited lang ang redemption codes. E promo today lang, kaya hurry. Download now and win today. Love you."
+      ]
+    },
+    {
+      "id": 3,
+      "type": "LoadAudio",
+      "pos": [
+        3841.144371569522,
+        13.613954620260476
+      ],
+      "size": [
+        270,
+        136
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.19.5",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "gaoqian.wav",
+        null,
+        null
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MEGA_ASR_MODEL"
+    ],
+    [
+      3,
+      2,
+      0,
+      4,
+      0,
+      "STRING"
+    ],
+    [
+      5,
+      3,
+      0,
+      2,
+      1,
+      "AUDIO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ue_links": [],
+    "ds": {
+      "scale": 1.1671841070450018,
+      "offset": [
+        -3387.8412433790045,
+        590.9125395440454
+      ]
+    },
+    "frontendVersion": "1.42.14",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

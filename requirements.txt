@@ -1,0 +1,5 @@
+qwen-asr
+safetensors
+soundfile
+scipy
+torchaudio

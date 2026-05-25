@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+.venv/
+venv/
+env/
+
+# Optional local clone of the official implementation.
+Mega-ASR/
+third_party/
+
+# Model weights should live in ComfyUI/models/Mega-ASR, not in this plugin repo.
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf

@@ -1,0 +1,8 @@
+ComfyUI-Mega-ASR
+
+This project includes a ComfyUI wrapper and built-in inference adapter for Mega-ASR.
+Portions of the inference adapter are adapted from the official Mega-ASR project:
+https://github.com/xzf-thu/Mega-ASR.git
+
+Mega-ASR model weights are distributed by their original authors at:
+https://huggingface.co/zhifeixie/Mega-ASR
